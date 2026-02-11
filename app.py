@@ -281,68 +281,90 @@ def teacher():
     return render_template("teacher.html")
 
 
-@app.route("/student_new", methods=["GET", "POST"])
-def student_new():
-    """Handle student registration. GET: Display form, POST: Process registration"""
-    firebase_config = get_firebase_config()
-
-    logger.info(f"Student registration request: {request.method}")
+def register_user(user_type, form_data, template_name, require_auth_code=False, auth_code_env_var=None):
+    """Generic registration helper function for both students and teachers.
     
-    # Getting the form data
+    Args:
+        user_type (str): Type of user ('student' or 'teacher')
+        form_data: Flask request.form object
+        template_name (str): Name of the template to render
+        require_auth_code (bool): Whether to require an authorization code
+        auth_code_env_var (str): Environment variable name for the auth code
+        
+    Returns:
+        Response: Redirect or rendered template with appropriate context
+    """
+    firebase_config = get_firebase_config()
+    logger.info(f"{user_type.capitalize()} registration request: {request.method}")
+    
     if request.method == "POST":
-        student_name = request.form.get("student_name")
-        student_id = request.form.get("student_id")
-        email = request.form.get("email")
-        phone_number = request.form.get("phone_number")
-        password = generate_password_hash(request.form.get("password"))
-        student_gender = request.form.get("student_gender")
-        student_dept = request.form.get("student_dept")
+        # Extract common fields
+        name = form_data.get(f"{user_type}_name")
+        user_id = form_data.get(f"{user_type}_id")
+        email = form_data.get("email")
+        phone_number = form_data.get("phone_number")
+        password = generate_password_hash(form_data.get("password"))
+        gender = form_data.get(f"{user_type}_gender")
+        dept = form_data.get(f"{user_type}_dept")
+        
+        logger.info(f"Registering {user_type}: {user_id}")
 
-        logger.info(f"Registering student: {student_id}")
+        # Authorization code check if required
+        if require_auth_code and auth_code_env_var:
+            auth_code = form_data.get(f"{user_type}_code")
+            required_code = os.environ.get(auth_code_env_var, "default_code")
+            if auth_code != required_code:
+                logger.warning(f"Invalid {user_type} code provided for: {user_id}")
+                return render_template(
+                    f"{template_name}.html",
+                    error=f"Invalid {user_type.capitalize()} Code. Registration denied.",
+                    firebase_config=firebase_config
+                )
 
-        # Connecting to the database
         connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
 
-        # Check if the student table exists
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='student'")
-        if not cursor.fetchone():
-            logger.warning("Student table doesn't exist! Creating now...")
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS student (
-                student_name TEXT NOT NULL,
-                student_id TEXT PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                phone_number TEXT,
-                password TEXT NOT NULL,
-                student_gender TEXT,
-                student_dept TEXT
-            )
-            ''')
-            connection.commit()
-        
         try:
-            # Inserting the values into the student table
-            cursor.execute("""
-                INSERT INTO student (student_name, student_id, email, phone_number, password, student_gender, student_dept)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (student_name, student_id, email, phone_number, password, student_gender, student_dept))
+            # Insert the user
+            cursor.execute(f"""
+                INSERT INTO {user_type} (
+                    {user_type}_name, {user_type}_id, email, phone_number, 
+                    password, {user_type}_gender, {user_type}_dept
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (name, user_id, email, phone_number, password, gender, dept))
             
-            # Committing changes
             connection.commit()
-            logger.info(f"Student {student_id} registered successfully!")
-            return redirect(url_for("student"))
+            logger.info(f"{user_type.capitalize()} {user_id} registered successfully!")
+            return redirect(url_for(user_type))
+            
         except sqlite3.IntegrityError as e:
-            logger.error(f"Student registration failed - Duplicate record: {e}")
-            return render_template("student_new.html", error="This email or student ID already exists", firebase_config=firebase_config)
+            logger.error(f"{user_type.capitalize()} registration failed - Duplicate record: {e}")
+            return render_template(
+                f"{template_name}.html",
+                error="This email or ID already exists",
+                firebase_config=firebase_config
+            )
         except sqlite3.Error as e:
-            logger.error(f"Database error during registration: {e}")
-            return render_template("student_new.html", error="Database error occurred", firebase_config=firebase_config)
+            logger.error(f"Database error during {user_type} registration: {e}")
+            return render_template(
+                f"{template_name}.html",
+                error="Database error occurred",
+                firebase_config=firebase_config
+            )
         finally:
-            # Closing the connection
             connection.close()
     
-    return render_template("student_new.html", firebase_config=firebase_config)
+    return render_template(f"{template_name}.html", firebase_config=firebase_config)
+
+
+@app.route("/student_new", methods=["GET", "POST"])
+def student_new():
+    """Handle student registration. GET: Display form, POST: Process registration"""
+    return register_user(
+        user_type="student",
+        form_data=request.form,
+        template_name="student_new"
+    )
 
 
 @app.route("/teacher-new", endpoint="teacher-new", methods=["GET", "POST"])
@@ -350,69 +372,13 @@ def teacher_new():
     """Handle teacher registration. GET: Display form, POST: Process registration
     Requires TEACHER_REGISTRATION_CODE for security
     """
-    if request.method == "POST":
-        teacher_name = request.form.get("teacher_name")
-        teacher_id = request.form.get("teacher_id")
-        email = request.form.get("email")
-        phone_number = request.form.get("phone_number")
-        password = generate_password_hash(request.form.get("password"))
-        teacher_gender = request.form.get("teacher_gender")
-        teacher_dept = request.form.get("teacher_dept")
-
-        logger.info(f"Teacher registration attempt: {teacher_id}")
-
-        # Check for Teacher Code
-        teacher_code = request.form.get("teacher_code")
-        # Get the secret code from environment variable or use default
-        required_code = os.environ.get("TEACHER_REGISTRATION_CODE", "admin123")
-        
-        if teacher_code != required_code:
-            logger.warning(f"Invalid teacher code provided for: {teacher_id}")
-            return render_template("teacher_new.html", error="Invalid Teacher Code. Registration denied.")
-
-                # Connecting to the database
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
-
-        # Check if the teacher table exists
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='teacher'")
-        if not cursor.fetchone():
-            logger.warning("Teacher table doesn't exist! Creating now...")
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS teacher (
-                teacher_name TEXT NOT NULL,
-                teacher_id TEXT PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                phone_number TEXT,
-                password TEXT NOT NULL,
-                teacher_gender TEXT,
-                teacher_dept TEXT
-            )
-            ''')
-            connection.commit()
-
-        try:
-            cursor.execute("""
-            INSERT INTO teacher (teacher_name, teacher_id, email, phone_number, password, teacher_gender, teacher_dept)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (teacher_name, teacher_id, email, phone_number, password, teacher_gender, teacher_dept))
-
-            # Committing changes
-            connection.commit()
-            logger.info(f"Teacher {teacher_id} registered successfully!")
-            return redirect(url_for("teacher"))
-        except sqlite3.IntegrityError as e:
-            logger.error(f"Teacher registration failed - Duplicate record: {e}")
-            return render_template("teacher_new.html", error="This email or teacher ID already exists")
-        except sqlite3.Error as e:
-            logger.error(f"Database error during teacher registration: {e}")
-            return render_template("teacher_new.html", error="Database error occurred")
-
-        finally:
-            # Closing the connection
-            connection.close()
-
-    return render_template("teacher_new.html")
+    return register_user(
+        user_type="teacher",
+        form_data=request.form,
+        template_name="teacher_new",
+        require_auth_code=True,
+        auth_code_env_var="TEACHER_REGISTRATION_CODE"
+    )
 
 
 @app.route("/teacher-achievements", endpoint="teacher-achievements")
