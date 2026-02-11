@@ -9,6 +9,10 @@ from dotenv import load_dotenv
 
 from config import DevelopmentConfig, ProductionConfig
 from firebase_config import get_firebase_config, validate_firebase_config
+from utils import allowed_file, init_db, handle_registration
+
+import firebase_admin
+from firebase_admin import auth, credentials
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,6 +32,18 @@ app = Flask(__name__)
 
 app.secret_key = os.getenv("SECRET_KEY")
 
+# Initialize Firebase Admin SDK
+firebase_service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+if firebase_service_account and os.path.exists(firebase_service_account):
+    try:
+        cred = credentials.Certificate(firebase_service_account)
+        firebase_admin.initialize_app(cred)
+        logger.info("Firebase Admin SDK initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing Firebase Admin SDK: {e}")
+else:
+    logger.warning("FIREBASE_SERVICE_ACCOUNT_PATH not found or file does not exist. Token verification will be skipped.")
+
 # Choose config based on environment
 env = os.environ.get("FLASK_ENV", "development")
 
@@ -44,174 +60,23 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
-def allowed_file(filename):
-    return (
-        "." in filename and
-        filename.rsplit(".", 1)[1].lower()
-        in app.config["ALLOWED_EXTENSIONS"]
-    )
-
-
-# ------------------------------------------------------------------
-# Database migration helpers
-# ------------------------------------------------------------------
-
-def add_teacher_id_column():
-    try:
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
-
-        cursor.execute("PRAGMA table_info(achievements)")
-        columns = cursor.fetchall()
-        column_names = [column[1] for column in columns]
-
-        if "teacher_id" not in column_names:
-            cursor.execute(
-                "ALTER TABLE achievements ADD COLUMN teacher_id TEXT DEFAULT 'unknown'"
-            )
-            connection.commit()
-
-        connection.close()
-    except sqlite3.Error as e:
-        print(f"Error adding teacher_id column: {e}")
-
-
-def migrate_achievements_table():
-    connection = sqlite3.connect(DB_PATH)
-    cursor = connection.cursor()
-
-    cursor.execute("PRAGMA table_info(achievements)")
-    columns = cursor.fetchall()
-    column_names = [column[1] for column in columns]
-
-    if "teacher_id" not in column_names:
-        cursor.execute("ALTER TABLE achievements RENAME TO achievements_backup")
-
-        cursor.execute("""
-        CREATE TABLE achievements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id TEXT NOT NULL,
-            teacher_id TEXT NOT NULL DEFAULT 'unknown',
-            achievement_type TEXT NOT NULL,
-            event_name TEXT NOT NULL,
-            achievement_date DATE NOT NULL,
-            organizer TEXT NOT NULL,
-            position TEXT NOT NULL,
-            achievement_description TEXT,
-            certificate_path TEXT,
-            symposium_theme TEXT,
-            programming_language TEXT,
-            coding_platform TEXT,
-            paper_title TEXT,
-            journal_name TEXT,
-            conference_level TEXT,
-            conference_role TEXT,
-            team_size INTEGER,
-            project_title TEXT,
-            database_type TEXT,
-            difficulty_level TEXT,
-            other_description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (student_id) REFERENCES student(student_id),
-            FOREIGN KEY (teacher_id) REFERENCES teacher(teacher_id)
-        )
-        """)
-
-        cursor.execute("""
-        INSERT INTO achievements (
-            id, student_id, achievement_type, event_name,
-            achievement_date, organizer, position, achievement_description,
-            certificate_path, symposium_theme, programming_language, coding_platform,
-            paper_title, journal_name, conference_level, conference_role,
-            team_size, project_title, database_type, difficulty_level,
-            other_description, created_at
-        )
-        SELECT
-            id, student_id, achievement_type, event_name,
-            achievement_date, organizer, position, achievement_description,
-            certificate_path, symposium_theme, programming_language, coding_platform,
-            paper_title, journal_name, conference_level, conference_role,
-            team_size, project_title, database_type, difficulty_level,
-            other_description, created_at
-        FROM achievements_backup
-        """)
-
-        connection.commit()
-
-    connection.close()
-
-
 # Initialize database on startup
-# ------------------------------------------------------------------
-# Database init
-# ------------------------------------------------------------------
-
-def init_db():
-    db_path = app.config["DB_PATH"]
-
-    connection = sqlite3.connect(db_path)
-    cursor = connection.cursor()
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS student (
-        student_name TEXT NOT NULL,
-        student_id TEXT PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        phone_number TEXT,
-        password TEXT NOT NULL,
-        student_gender TEXT,
-        student_dept TEXT
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS teacher (
-        teacher_name TEXT NOT NULL,
-        teacher_id TEXT PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        phone_number TEXT,
-        password TEXT NOT NULL,
-        teacher_gender TEXT,
-        teacher_dept TEXT
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS achievements (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        teacher_id TEXT NOT NULL,
-        student_id TEXT NOT NULL,
-        achievement_type TEXT NOT NULL,
-        event_name TEXT NOT NULL,
-        achievement_date DATE NOT NULL,
-        organizer TEXT NOT NULL,
-        position TEXT NOT NULL,
-        achievement_description TEXT,
-        certificate_path TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (student_id) REFERENCES student(student_id),
-        FOREIGN KEY (teacher_id) REFERENCES teacher(teacher_id)
-    )
-    """)
-
-    connection.commit()
-    connection.close()
-
-# Call initialization function
-init_db()
+init_db(DB_PATH)
 
 @app.route("/")
-def home():
+def home() -> str:
+    """Render the homepage."""
     return render_template("index.html")
 
 
 @app.route("/student", methods=["GET", "POST"])
-def student():
-    """Handle student login. GET: Display login form, POST: Authenticate student"""
+def student() -> any:
+    """
+    Handle student login.
+    
+    Returns:
+        Rendered login template or dashboard redirect
+    """
     firebase_config = get_firebase_config()
     
     if request.method == "POST":
@@ -246,8 +111,13 @@ def student():
 
 
 @app.route("/teacher", methods=["GET", "POST"])
-def teacher():
-    """Handle teacher login. GET: Display login form, POST: Authenticate teacher"""
+def teacher() -> any:
+    """
+    Handle teacher login.
+    
+    Returns:
+        Rendered login template or dashboard redirect
+    """
     if request.method == "POST":
 
         # Get user data
@@ -281,113 +151,56 @@ def teacher():
     return render_template("teacher.html")
 
 
-def register_user(user_type, form_data, template_name, require_auth_code=False, auth_code_env_var=None):
-    """Generic registration helper function for both students and teachers.
-    
-    Args:
-        user_type (str): Type of user ('student' or 'teacher')
-        form_data: Flask request.form object
-        template_name (str): Name of the template to render
-        require_auth_code (bool): Whether to require an authorization code
-        auth_code_env_var (str): Environment variable name for the auth code
-        
-    Returns:
-        Response: Redirect or rendered template with appropriate context
-    """
-    firebase_config = get_firebase_config()
-    logger.info(f"{user_type.capitalize()} registration request: {request.method}")
-    
-    if request.method == "POST":
-        # Extract common fields
-        name = form_data.get(f"{user_type}_name")
-        user_id = form_data.get(f"{user_type}_id")
-        email = form_data.get("email")
-        phone_number = form_data.get("phone_number")
-        password = generate_password_hash(form_data.get("password"))
-        gender = form_data.get(f"{user_type}_gender")
-        dept = form_data.get(f"{user_type}_dept")
-        
-        logger.info(f"Registering {user_type}: {user_id}")
-
-        # Authorization code check if required
-        if require_auth_code and auth_code_env_var:
-            auth_code = form_data.get(f"{user_type}_code")
-            required_code = os.environ.get(auth_code_env_var, "default_code")
-            if auth_code != required_code:
-                logger.warning(f"Invalid {user_type} code provided for: {user_id}")
-                return render_template(
-                    f"{template_name}.html",
-                    error=f"Invalid {user_type.capitalize()} Code. Registration denied.",
-                    firebase_config=firebase_config
-                )
-
-        connection = sqlite3.connect(DB_PATH)
-        cursor = connection.cursor()
-
-        try:
-            # Insert the user
-            cursor.execute(f"""
-                INSERT INTO {user_type} (
-                    {user_type}_name, {user_type}_id, email, phone_number, 
-                    password, {user_type}_gender, {user_type}_dept
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (name, user_id, email, phone_number, password, gender, dept))
-            
-            connection.commit()
-            logger.info(f"{user_type.capitalize()} {user_id} registered successfully!")
-            return redirect(url_for(user_type))
-            
-        except sqlite3.IntegrityError as e:
-            logger.error(f"{user_type.capitalize()} registration failed - Duplicate record: {e}")
-            return render_template(
-                f"{template_name}.html",
-                error="This email or ID already exists",
-                firebase_config=firebase_config
-            )
-        except sqlite3.Error as e:
-            logger.error(f"Database error during {user_type} registration: {e}")
-            return render_template(
-                f"{template_name}.html",
-                error="Database error occurred",
-                firebase_config=firebase_config
-            )
-        finally:
-            connection.close()
-    
-    return render_template(f"{template_name}.html", firebase_config=firebase_config)
-
-
 @app.route("/student_new", methods=["GET", "POST"])
-def student_new():
-    """Handle student registration. GET: Display form, POST: Process registration"""
-    return register_user(
+def student_new() -> any:
+    """
+    Handle student registration.
+    
+    Returns:
+        Rendered registration form or login redirect
+    """
+    return handle_registration(
         user_type="student",
         form_data=request.form,
-        template_name="student_new"
+        template_name="student_new",
+        db_path=DB_PATH
     )
 
 
 @app.route("/teacher-new", endpoint="teacher-new", methods=["GET", "POST"])
-def teacher_new():
-    """Handle teacher registration. GET: Display form, POST: Process registration
-    Requires TEACHER_REGISTRATION_CODE for security
+def teacher_new() -> any:
     """
-    return register_user(
+    Handle teacher registration.
+    
+    Requires TEACHER_REGISTRATION_CODE for security.
+    
+    Returns:
+        Rendered registration form or login redirect
+    """
+    return handle_registration(
         user_type="teacher",
         form_data=request.form,
         template_name="teacher_new",
+        db_path=DB_PATH,
         require_auth_code=True,
         auth_code_env_var="TEACHER_REGISTRATION_CODE"
     )
 
 
 @app.route("/teacher-achievements", endpoint="teacher-achievements")
-def teacher_achievements():
-    return render_template("teacher_achievements_2.html")
+def teacher_achievements() -> str:
+    """Render the teacher achievements page."""
+    return render_template("teacher_achievements.html")
 
 
 @app.route("/submit_achievements", endpoint="submit_achievements", methods=["GET", "POST"])
-def submit_achievements():
+def submit_achievements() -> any:
+    """
+    Handle achievement submission by teachers.
+    
+    Returns:
+        Rendered template with success/error message or redirect
+    """
     # Check if teacher is logged in
     if not session.get('logged_in') or not session.get('teacher_id'):
         return redirect(url_for('teacher'))
@@ -397,9 +210,9 @@ def submit_achievements():
 
     if request.method == "POST":
         try:
-            # Debug: Print all form data to see what's being received
-            print("Form data received:", request.form)
-            print("Files received:", request.files)
+            # Debug: Log form data
+            logger.info(f"Form data received: {request.form}")
+            logger.info(f"Files received: {request.files}")
             
             student_id = request.form.get("student_id")
             # Get teacher ID from session
@@ -411,23 +224,19 @@ def submit_achievements():
             position = request.form.get("position")
             achievement_description = request.form.get("achievement_description")
 
-            # Debug: Print key form values
-            print(f"Student ID: {student_id}")
-            print(f"Achievement Type: {achievement_type}")
-            print(f"Event Name: {event_name}")
+            # Log key form values
+            logger.info(f"Student ID: {student_id}, Type: {achievement_type}, Event: {event_name}")
 
 
             with sqlite3.connect(DB_PATH) as connection:
-                # First establish connection and cursor before using them
-                # connection = sqlite3.connect(DB_PATH)
                 cursor = connection.cursor()
 
-                # Debug: Check if achievements table exists
+                # Check if achievements table exists
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='achievements'")
                 table_exists = cursor.fetchone()
-                print(f"Achievements table exists: {table_exists is not None}")
+                logger.info(f"Achievements table exists: {table_exists is not None}")
 
-                # Check if student ID exists - fixed parameter passing
+                # Check if student ID exists
                 cursor.execute("SELECT student_id, student_name FROM student WHERE student_id = ?", (student_id,))
                 student_data = cursor.fetchone()
                     
@@ -442,7 +251,7 @@ def submit_achievements():
                 if 'certificate' in request.files:
                     file = request.files['certificate']
                     if file and file.filename != '':
-                        if allowed_file(file.filename):
+                        if allowed_file(file.filename, app.config["ALLOWED_EXTENSIONS"]):
                             # Create a secure filename with timestamp to prevent duplicates
                             timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
                             secure_name = f"{timestamp}_{secure_filename(file.filename)}"
@@ -496,15 +305,15 @@ def submit_achievements():
 
                     # Check how many rows were affected
                     rows_affected = cursor.rowcount
-                    print(f"Rows inserted: {rows_affected}")
+                    logger.info(f"Rows inserted: {rows_affected}")
                 
                     connection.commit()
-                    print("Database committed successfully")
+                    logger.info("Database committed successfully")
 
                     # Verify the data was inserted by selecting it back
                     cursor.execute("SELECT * FROM achievements WHERE student_id = ? ORDER BY id DESC LIMIT 1", (student_id,))
                     inserted_data = cursor.fetchone()
-                    print(f"Data after insertion: {inserted_data}")
+                    logger.info(f"Data after insertion: {inserted_data}")
             
                     connection.close()
 
@@ -513,14 +322,12 @@ def submit_achievements():
 
             
                 except sqlite3.Error as sql_error:
-                    print(f"SQL Error: {sql_error}")
+                    logger.error(f"SQL Error: {sql_error}")
                     connection.close()
                     return render_template("submit_achievements.html", error=f"Database error: {str(sql_error)}")
     
         except Exception as e:
-            print(f"Error submitting achievement: {e}")
-            import traceback
-            traceback.print_exc()  # Print the full error traceback for debugging
+            logger.error(f"Error submitting achievement: {e}")
             return render_template("submit_achievements.html", error=f"An error occurred: {str(e)}")
         
 
@@ -529,7 +336,13 @@ def submit_achievements():
 
 
 @app.route("/student-achievements", endpoint="student-achievements")
-def student_achievements():
+def student_achievements() -> any:
+    """
+    Render the student's achievement view.
+    
+    Returns:
+        Rendered template or redirect to login
+    """
     # Check if user is logged in
     if not session.get('logged_in'):
         return redirect(url_for('student'))
@@ -540,11 +353,17 @@ def student_achievements():
         'name': session.get('student_name'),
         'dept': session.get('student_dept')
     }
-    return render_template("student_achievements_1.html", student=student_data)
+    return render_template("student_achievements.html", student=student_data)
 
 
 @app.route("/student-dashboard", endpoint="student-dashboard")
-def student_dashboard():
+def student_dashboard() -> any:
+    """
+    Render the student dashboard.
+    
+    Returns:
+        Rendered template or redirect to login
+    """
     # Check if user is logged in
     if not session.get('logged_in'):
         return redirect(url_for('student'))
@@ -561,7 +380,13 @@ def student_dashboard():
 
 # Temporary Code. Needs to be updated once the backend is complete
 @app.route("/teacher-dashboard", endpoint="teacher-dashboard")
-def teacher_dashboard():
+def teacher_dashboard() -> any:
+    """
+    Render the teacher dashboard with statistics and recent entries.
+    
+    Returns:
+        Rendered template or redirect to login
+    """
     # Check if user is logged in
     if not session.get('logged_in'):
         return redirect(url_for('teacher'))
@@ -624,7 +449,13 @@ def teacher_dashboard():
 
 
 @app.route("/all-achievements", endpoint="all-achievements")
-def all_achievements():
+def all_achievements() -> any:
+    """
+    Render all achievements recorded by the current teacher.
+    
+    Returns:
+        Rendered template or redirect to login
+    """
     # Check if user is logged in
     if not session.get('logged_in'):
         return redirect(url_for('teacher'))
@@ -658,20 +489,24 @@ def all_achievements():
 # ------------------------------------------------------------------
 
 @app.route("/auth/firebase-config", methods=["GET"])
-def get_auth_firebase_config():
+def get_auth_firebase_config() -> any:
     """
-    Returns Firebase configuration to frontend
-    This endpoint provides the config needed for Firebase initialization
-    IMPORTANT: apiKey is public and safe to expose, but never expose private keys
+    Returns Firebase configuration to frontend.
+    
+    This endpoint provides the config needed for Firebase initialization.
+    IMPORTANT: apiKey is public and safe to expose, but never expose private keys.
+    
+    Returns:
+        JSON response with Firebase config
     """
     firebase_config = get_firebase_config()
     return jsonify(firebase_config)
 
 
 @app.route("/auth/google-login", methods=["POST"])
-def google_login():
+def google_login() -> any:
     """
-    Handle Google Sign-In authentication
+    Handle Google Sign-In authentication.
     
     Expected POST data:
     {
@@ -682,24 +517,32 @@ def google_login():
         "idToken": "firebase_id_token"
     }
     
-    TODO: Developers should integrate with Firebase Admin SDK to verify idToken
-    For now, basic email validation is implemented
+    Verifies the identity token with Firebase Admin SDK if available.
+    
+    Returns:
+        JSON response with success status and redirect URL
     """
     try:
         data = request.get_json()
+        id_token = data.get("idToken")
         email = data.get("email")
-        display_name = data.get("displayName")
-        photo_url = data.get("photoURL")
         firebase_uid = data.get("uid")
         
-        # TODO: Verify idToken with Firebase Admin SDK
-        # import firebase_admin
-        # from firebase_admin import auth
-        # try:
-        #     decoded_token = auth.verify_id_token(data.get("idToken"))
-        #     uid = decoded_token['uid']
-        # except:
-        #     return jsonify({"success": False, "message": "Invalid token"}), 401
+        # Verify idToken with Firebase Admin SDK if initialized
+        verified_email = None
+        if firebase_admin._apps:
+            try:
+                decoded_token = auth.verify_id_token(id_token)
+                verified_email = decoded_token.get('email')
+                if verified_email != email:
+                    logger.warning(f"Email mismatch: {verified_email} vs {email}")
+                    return jsonify({"success": False, "message": "Identity verification failed"}), 401
+                logger.info(f"Firebase token verified for {email}")
+            except Exception as e:
+                logger.error(f"Firebase token verification failed: {e}")
+                return jsonify({"success": False, "message": f"Invalid token: {str(e)}"}), 401
+        else:
+            logger.warning("Firebase Admin not initialized. Skipping token verification (Development Mode Only).")
         
         if not email:
             return jsonify({"success": False, "message": "Email is required"}), 400
@@ -728,8 +571,6 @@ def google_login():
                 "redirectUrl": "/student-dashboard"
             }), 200
         else:
-            # TODO: Create new student account or ask to register
-            # For now, reject unknown users
             connection.close()
             return jsonify({
                 "success": False, 
@@ -737,6 +578,7 @@ def google_login():
             }), 404
             
     except Exception as e:
+        logger.error(f"Login error: {e}")
         return jsonify({
             "success": False, 
             "message": f"Login error: {str(e)}"
@@ -744,10 +586,14 @@ def google_login():
 
 
 @app.route("/auth/logout", methods=["POST"])
-def logout():
+def logout() -> any:
     """
-    Handle logout for both traditional and Google Sign-In users
-    Clears session data
+    Handle logout for both traditional and Google Sign-In users.
+    
+    Clears session data.
+    
+    Returns:
+        JSON response with success status
     """
     session.clear()
     return jsonify({
@@ -759,7 +605,7 @@ def logout():
     
 if __name__ == "__main__":
     logger.info("Starting Achievement Management System...")
-    init_db()
+    init_db(DB_PATH)
     logger.info("Database initialized successfully")
     app.run(debug=True)
 
